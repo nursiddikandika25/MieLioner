@@ -9,8 +9,17 @@ import {
   RefreshCw,
   Plus,
   Minus,
+  QrCode,
+  Download,
+  Receipt,
 } from 'lucide-react';
+import {
+  ORDER_STATUS_OPTIONS,
+  type OrderRecord,
+  type OrderStatus,
+} from '../data/menuCatalog';
 import { formatPercent, formatRupiah } from '../utils/formatters';
+import { BarcodeTicketCard, getStatusTextClass } from './BarcodeTicket';
 
 interface FinanceBreakdownItem {
   menuId: string;
@@ -47,6 +56,18 @@ interface KitchenSop {
   steps: string[];
 }
 
+interface OrderReportSummary {
+  totalOrders: number;
+  dineInCount: number;
+  takeawayCount: number;
+  pendingCount: number;
+  cookingCount: number;
+  readyCount: number;
+  completedCount: number;
+  totalOrderRevenue: number;
+  totalPackingCollected: number;
+}
+
 interface ManagementOverviewResponse {
   finance: {
     totalGrossRevenue: number;
@@ -60,24 +81,42 @@ interface ManagementOverviewResponse {
   ingredients: IngredientStock[];
   sops: KitchenSop[];
   portionsSold: Record<string, number>;
+  orders?: OrderRecord[];
+  orderReportSummary?: OrderReportSummary;
 }
 
 interface ManagementWorkspaceProps {
   refreshSignal: number;
   onRequestAiAnalysis: (prompt: string) => void;
+  onOrdersMutated?: () => void;
 }
 
-type ManagementTab = 'margin' | 'sales' | 'stock' | 'sop';
+type ManagementTab = 'orders' | 'margin' | 'sales' | 'stock' | 'sop';
+
+function sanitizeCsvCell(val: string): string {
+  const str = String(val ?? '');
+  const escaped = /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+  return `"${escaped.replace(/"/g, '""')}"`;
+}
 
 export function ManagementWorkspace({
   refreshSignal,
   onRequestAiAnalysis,
+  onOrdersMutated,
 }: ManagementWorkspaceProps) {
-  const [activeTab, setActiveTab] = useState<ManagementTab>('margin');
+  const [activeTab, setActiveTab] = useState<ManagementTab>('orders');
   const [data, setData] = useState<ManagementOverviewResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string>('Semua');
+
+  // Order report & barcode verification state
+  const [orderStatusFilter, setOrderStatusFilter] = useState<'Semua' | OrderStatus>('Semua');
+  const [orderSearch, setOrderSearch] = useState('');
+  const [barcodeVerifyInput, setBarcodeVerifyInput] = useState('');
+  const [barcodeVerifyError, setBarcodeVerifyError] = useState<string | null>(null);
+  const [selectedOrder, setSelectedOrder] = useState<OrderRecord | null>(null);
+  const [updatingOrderId, setUpdatingOrderId] = useState<string | null>(null);
 
   // Editable shift sales draft
   const [draftPortions, setDraftPortions] = useState<Record<string, number>>({});
@@ -160,6 +199,117 @@ export function ManagementWorkspace({
     }
   };
 
+  const handleVerifyBarcode = async () => {
+    const code = barcodeVerifyInput.trim();
+    if (!code) return;
+    setBarcodeVerifyError(null);
+    try {
+      const res = await fetch(
+        `/api/orders/lookup?code=${encodeURIComponent(code)}`
+      );
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.error || 'Kode barcode tidak ditemukan.');
+      }
+      setSelectedOrder(json.order as OrderRecord);
+    } catch (err: unknown) {
+      setBarcodeVerifyError(
+        err instanceof Error ? err.message : 'Gagal memverifikasi barcode.'
+      );
+    }
+  };
+
+  const handleUpdateOrderStatus = async (orderId: string, nextStatus: OrderStatus) => {
+    setUpdatingOrderId(orderId);
+    setErrorMsg(null);
+    try {
+      const res = await fetch(
+        `/api/orders/${encodeURIComponent(orderId)}/status`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: nextStatus }),
+        }
+      );
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.error || 'Gagal memperbarui status pesanan.');
+      }
+      const updated = json.order as OrderRecord;
+      setData((prev) => {
+        if (!prev) return prev;
+        const nextOrders = (prev.orders || []).map((o) =>
+          o.id === updated.id ? updated : o
+        );
+        return {
+          ...prev,
+          orders: nextOrders,
+          orderReportSummary: json.summary ?? prev.orderReportSummary,
+        };
+      });
+      setSelectedOrder((curr) => (curr && curr.id === updated.id ? updated : curr));
+      onOrdersMutated?.();
+    } catch (err: unknown) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Gagal memperbarui status pesanan.'
+      );
+    } finally {
+      setUpdatingOrderId(null);
+    }
+  };
+
+  const handleExportOrdersCsv = () => {
+    const rows = data?.orders || [];
+    if (rows.length === 0) return;
+
+    const header = [
+      'ID Order',
+      'Kode Barcode',
+      'Waktu',
+      'Pemesan',
+      'Tipe Pesanan',
+      'Zona Meja',
+      'Daftar Menu',
+      'Biaya Packing',
+      'Total Order',
+      'Status',
+      'Catatan',
+    ];
+
+    const lines = [
+      header.map(sanitizeCsvCell).join(','),
+      ...rows.map((ord) =>
+        [
+          ord.id,
+          ord.barcodeCode,
+          new Date(ord.createdAt).toLocaleString('id-ID'),
+          ord.customerName || 'Pelanggan',
+          ord.orderType === 'takeaway' ? 'Takeaway' : 'Dine-in',
+          ord.tableZone || '-',
+          ord.items.map((i) => `${i.quantity}x ${i.name}`).join('; '),
+          String(ord.packingFee),
+          String(ord.totalAmount),
+          ord.status,
+          ord.customerNote || '-',
+        ]
+          .map(sanitizeCsvCell)
+          .join(',')
+      ),
+    ];
+
+    const blob = new Blob([lines.join('\n')], {
+      type: 'text/csv;charset=utf-8;',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `laporan-order-mielioner-${new Date()
+      .toISOString()
+      .slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const lowStockHighMargin = useMemo(() => {
     if (!data) return [];
     return data.ingredients.filter(
@@ -212,6 +362,31 @@ export function ManagementWorkspace({
   const filteredFinance = data.finance.breakdown.filter(
     (row) => categoryFilter === 'Semua' || row.category === categoryFilter
   );
+
+  const allOrders = data.orders || [];
+  const filteredOrders = allOrders.filter((ord) => {
+    const matchStatus =
+      orderStatusFilter === 'Semua' || ord.status === orderStatusFilter;
+    const q = orderSearch.trim().toLowerCase();
+    const matchQuery =
+      !q ||
+      ord.id.toLowerCase().includes(q) ||
+      ord.barcodeCode.toLowerCase().includes(q) ||
+      (ord.customerName && ord.customerName.toLowerCase().includes(q));
+    return matchStatus && matchQuery;
+  });
+
+  const orderReportSummary = data.orderReportSummary || {
+    totalOrders: allOrders.length,
+    dineInCount: allOrders.filter((o) => o.orderType === 'dine-in').length,
+    takeawayCount: allOrders.filter((o) => o.orderType === 'takeaway').length,
+    pendingCount: allOrders.filter((o) => o.status === 'Menunggu Diproses').length,
+    cookingCount: allOrders.filter((o) => o.status === 'Sedang Dimasak').length,
+    readyCount: allOrders.filter((o) => o.status === 'Siap Disajikan').length,
+    completedCount: allOrders.filter((o) => o.status === 'Selesai').length,
+    totalOrderRevenue: allOrders.reduce((s, o) => s + o.totalAmount, 0),
+    totalPackingCollected: allOrders.reduce((s, o) => s + o.packingFee, 0),
+  };
 
   return (
     <div className="space-y-8">
@@ -295,6 +470,18 @@ export function ManagementWorkspace({
           <div className="flex flex-wrap items-center gap-1.5 p-1 bg-stone-200/70 rounded-xl">
             <button
               type="button"
+              onClick={() => setActiveTab('orders')}
+              className={`px-3.5 py-2 text-xs sm:text-sm font-medium rounded-lg inline-flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+                activeTab === 'orders'
+                  ? 'bg-white text-zinc-900 shadow-sm'
+                  : 'text-zinc-600 hover:text-zinc-900'
+              }`}
+            >
+              <Receipt className="w-4 h-4" />
+              <span>Laporan Order &amp; Barcode ({orderReportSummary.totalOrders})</span>
+            </button>
+            <button
+              type="button"
               onClick={() => setActiveTab('margin')}
               className={`px-3.5 py-2 text-xs sm:text-sm font-medium rounded-lg inline-flex items-center gap-2 whitespace-nowrap cursor-pointer ${
                 activeTab === 'margin'
@@ -354,6 +541,269 @@ export function ManagementWorkspace({
         </div>
 
         <div className="p-6">
+          {/* TAB 0: INCOMING ORDERS REPORT & BARCODE VERIFICATION */}
+          {activeTab === 'orders' && (
+            <div className="space-y-6">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h3 className="font-display text-lg font-bold text-zinc-900">
+                    Laporan Order Masuk &amp; Verifikasi Kode Barcode
+                  </h3>
+                  <p className="text-sm text-zinc-600 mt-0.5">
+                    Verifikasi tiket barcode pelanggan dari daftar menu, kelola status masak hingga selesai, dan ekspor laporan order harian.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={allOrders.length === 0}
+                    onClick={handleExportOrdersCsv}
+                    className="px-3.5 py-2 rounded-lg border border-stone-300 bg-white text-xs font-semibold text-zinc-800 hover:bg-stone-50 inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Ekspor Laporan (.csv)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onRequestAiAnalysis(
+                        `Buatkan ringkasan laporan order masuk hari ini: total ${orderReportSummary.totalOrders} order (${orderReportSummary.dineInCount} Dine-in, ${orderReportSummary.takeawayCount} Takeaway), total nilai ${formatRupiah(
+                          orderReportSummary.totalOrderRevenue
+                        )}, menunggu/masak ${
+                          orderReportSummary.pendingCount +
+                          orderReportSummary.cookingCount
+                        } order, selesai ${orderReportSummary.completedCount} order.`
+                      )
+                    }
+                    className="px-3.5 py-2 rounded-lg bg-orange-600 text-white text-xs font-semibold hover:bg-orange-700 cursor-pointer"
+                  >
+                    Analisis Order via AI
+                  </button>
+                </div>
+              </div>
+
+              {/* Order Report Summary KPIs */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="border border-stone-200 rounded-xl p-4 bg-stone-50/50">
+                  <p className="text-xs text-zinc-500">Total Order Masuk</p>
+                  <p className="font-mono tabular-nums text-xl font-bold text-zinc-900 mt-1">
+                    {orderReportSummary.totalOrders} Order
+                  </p>
+                </div>
+                <div className="border border-stone-200 rounded-xl p-4 bg-stone-50/50">
+                  <p className="text-xs text-zinc-500">Dine-in / Takeaway</p>
+                  <p className="font-mono tabular-nums text-xl font-bold text-zinc-900 mt-1">
+                    {orderReportSummary.dineInCount} / {orderReportSummary.takeawayCount}
+                  </p>
+                </div>
+                <div className="border border-stone-200 rounded-xl p-4 bg-stone-50/50">
+                  <p className="text-xs text-zinc-500">Aktif / Selesai</p>
+                  <p className="font-mono tabular-nums text-xl font-bold text-orange-700 mt-1">
+                    {orderReportSummary.pendingCount +
+                      orderReportSummary.cookingCount +
+                      orderReportSummary.readyCount}{' '}
+                    / {orderReportSummary.completedCount}
+                  </p>
+                </div>
+                <div className="border border-stone-200 rounded-xl p-4 bg-stone-50/50">
+                  <p className="text-xs text-zinc-500">Nilai Order &amp; Packing</p>
+                  <p className="font-mono tabular-nums text-xl font-bold text-emerald-700 mt-1">
+                    {formatRupiah(orderReportSummary.totalOrderRevenue)}
+                  </p>
+                </div>
+              </div>
+
+              {/* Barcode Scanner / Verification Bar + Filter */}
+              <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-xl border border-stone-200 bg-stone-50/60">
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    value={barcodeVerifyInput}
+                    onChange={(e) => setBarcodeVerifyInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        void handleVerifyBarcode();
+                      }
+                    }}
+                    placeholder="Scan / masukkan kode barcode (misal ML101-1234)"
+                    className="min-h-[38px] w-64 px-3 py-1.5 text-xs rounded-lg border border-stone-300 bg-white text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:border-orange-600"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleVerifyBarcode()}
+                    className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-zinc-900 text-white text-xs font-semibold hover:bg-zinc-800 inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    <span>Verifikasi Barcode</span>
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    value={orderSearch}
+                    onChange={(e) => setOrderSearch(e.target.value)}
+                    placeholder="Cari ID / nama..."
+                    className="min-h-[36px] px-3 py-1.5 text-xs rounded-lg border border-stone-300 bg-white text-zinc-900"
+                  />
+                  <select
+                    aria-label="Filter status order"
+                    value={orderStatusFilter}
+                    onChange={(e) =>
+                      setOrderStatusFilter(e.target.value as 'Semua' | OrderStatus)
+                    }
+                    className="min-h-[36px] px-3 py-1.5 text-xs rounded-lg border border-stone-300 bg-white text-zinc-900"
+                  >
+                    <option value="Semua">Semua Status</option>
+                    {ORDER_STATUS_OPTIONS.map((st) => (
+                      <option key={st} value={st}>
+                        {st}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {barcodeVerifyError && (
+                <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs">
+                  {barcodeVerifyError}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                <div className="lg:col-span-8 overflow-x-auto border border-stone-200 rounded-xl">
+                  {filteredOrders.length === 0 ? (
+                    <div className="p-8 text-center text-sm text-zinc-500">
+                      Belum ada data order masuk yang sesuai filter. Pesanan yang dikonfirmasi pelanggan dari Mode Pelanggan akan langsung masuk ke laporan ini beserta kode barcode-nya.
+                    </div>
+                  ) : (
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="bg-stone-50 border-b border-stone-200 text-xs font-semibold text-zinc-600">
+                          <th className="py-3 px-4">Order &amp; Barcode</th>
+                          <th className="py-3 px-4">Pemesan &amp; Area</th>
+                          <th className="py-3 px-4">Menu Dipesan</th>
+                          <th className="py-3 px-4 text-right">Total</th>
+                          <th className="py-3 px-4">Status Proses</th>
+                          <th className="py-3 px-4 text-right">Tiket</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-stone-100 text-xs">
+                        {filteredOrders.map((ord) => (
+                          <tr
+                            key={ord.id}
+                            className={`hover:bg-stone-50/70 ${
+                              selectedOrder?.id === ord.id ? 'bg-orange-50/40' : ''
+                            }`}
+                          >
+                            <td className="py-3 px-4">
+                              <span className="font-mono font-bold text-zinc-900 block">
+                                #{ord.id}
+                              </span>
+                              <span className="font-mono text-[11px] text-zinc-600">
+                                {ord.barcodeCode}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className="font-medium text-zinc-900 block">
+                                {ord.customerName || 'Pelanggan'}
+                              </span>
+                              <span className="text-zinc-500">
+                                {ord.orderType === 'takeaway'
+                                  ? 'Takeaway (+Rp 1.000)'
+                                  : ord.tableZone || 'Dine-in'}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-zinc-700 max-w-[220px]">
+                              {ord.items
+                                .map((i) => `${i.quantity}x ${i.name}`)
+                                .join(', ')}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-zinc-900">
+                              {formatRupiah(ord.totalAmount)}
+                            </td>
+                            <td className="py-3 px-4">
+                              <select
+                                aria-label={`Ubah status pesanan ${ord.id}`}
+                                disabled={updatingOrderId === ord.id}
+                                value={ord.status}
+                                onChange={(e) =>
+                                  void handleUpdateOrderStatus(
+                                    ord.id,
+                                    e.target.value as OrderStatus
+                                  )
+                                }
+                                className={`px-2 py-1 rounded-md border text-[11px] font-semibold cursor-pointer ${getStatusTextClass(
+                                  ord.status
+                                )}`}
+                              >
+                                {ORDER_STATUS_OPTIONS.map((st) => (
+                                  <option key={st} value={st}>
+                                    {st}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedOrder(ord)}
+                                className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white hover:border-orange-500 hover:text-orange-700 font-semibold whitespace-nowrap cursor-pointer"
+                              >
+                                Tiket
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+
+                <div className="lg:col-span-4">
+                  {selectedOrder ? (
+                    <div className="space-y-3">
+                      <BarcodeTicketCard order={selectedOrder} compact />
+                      <div className="p-3 rounded-xl border border-stone-200 bg-stone-50 space-y-2">
+                        <p className="text-xs font-semibold text-zinc-700">
+                          Aksi Cepat Status Order #{selectedOrder.id}:
+                        </p>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {ORDER_STATUS_OPTIONS.map((st) => (
+                            <button
+                              key={st}
+                              type="button"
+                              disabled={
+                                updatingOrderId === selectedOrder.id ||
+                                selectedOrder.status === st
+                              }
+                              onClick={() =>
+                                void handleUpdateOrderStatus(selectedOrder.id, st)
+                              }
+                              className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer ${
+                                selectedOrder.status === st
+                                  ? 'bg-zinc-900 text-white border-zinc-900'
+                                  : 'bg-white text-zinc-700 border-stone-300 hover:border-orange-500'
+                              }`}
+                            >
+                              {st}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="border border-dashed border-stone-300 rounded-xl p-6 text-center text-xs text-zinc-500 bg-stone-50/60">
+                      Masukkan kode barcode atau klik tombol <strong className="text-zinc-800">Tiket</strong> pada daftar order untuk melihat struk barcode dan memproses pesanan.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* TAB 1: HPP & MARGIN MATRIX */}
           {activeTab === 'margin' && (
             <div className="space-y-8">

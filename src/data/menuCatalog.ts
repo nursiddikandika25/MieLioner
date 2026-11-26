@@ -25,10 +25,33 @@ export interface CartItem {
   quantity: number;
 }
 
+export type OrderStatus =
+  | 'Menunggu Diproses'
+  | 'Sedang Dimasak'
+  | 'Siap Disajikan'
+  | 'Selesai';
+
+export const ORDER_STATUS_OPTIONS: OrderStatus[] = [
+  'Menunggu Diproses',
+  'Sedang Dimasak',
+  'Siap Disajikan',
+  'Selesai',
+];
+
+export const TABLE_ZONE_OPTIONS = [
+  'Booth Timber Lantai 1',
+  'Mezzanine Lantai 2',
+  'Teras Outdoor',
+] as const;
+
 export interface OrderRecord {
   id: string;
+  barcodeCode: string;
   createdAt: string;
   orderType: OrderType;
+  status: OrderStatus;
+  customerName?: string;
+  tableZone?: string;
   items: Array<{
     menuId: string;
     name: string;

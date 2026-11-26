@@ -30,7 +30,6 @@ import {
 } from '../three/restaurantSceneBuilder';
 import { restaurantSound } from '../three/soundEngine';
 import {
-  fetchSingleSpeakerTts,
   voicePlayer,
   type DialogueScenario,
   type VoiceSpeakerId,
@@ -569,27 +568,16 @@ export function RestaurantSimulator3D({
           source: 'sim',
         });
 
-        // Subtle automatic Gemini voice narration for selected live events when sound is turned on
+        // Use zero-quota Indonesian Web Speech API for passive ambient chatter so Gemini TTS quota is preserved for explicit user actions
         const nowMs = Date.now();
         if (
           line.allowTts &&
           soundEnabledRef.current &&
           !voicePlayer.isPlaying() &&
-          nowMs - lastAutoTtsAt > 13000
+          nowMs - lastAutoTtsAt > 7500
         ) {
           lastAutoTtsAt = nowMs;
-          void fetchSingleSpeakerTts({
-            text: line.text,
-            speakerId: line.speakerId,
-          })
-            .then((res) => {
-              if (soundEnabledRef.current && !voicePlayer.isPlaying()) {
-                voicePlayer.enqueueWav(res.audioBase64);
-              }
-            })
-            .catch(() => {
-              // Ignore background auto-TTS hiccup silently
-            });
+          voicePlayer.speakAmbientBrowserVoice(line.text, line.speakerId);
         }
       }
     };

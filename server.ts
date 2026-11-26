@@ -1,14 +1,18 @@
 import 'dotenv/config';
+import crypto from 'crypto';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 import {
+  ORDER_STATUS_OPTIONS,
   PACKING_FEE,
   PUBLIC_MENU_ITEMS,
+  TABLE_ZONE_OPTIONS,
   type AppMode,
   type OrderRecord,
+  type OrderStatus,
   type OrderType,
 } from './src/data/menuCatalog.ts';
 import {
@@ -723,12 +727,50 @@ async function startServer() {
     });
   });
 
-  // Place customer order endpoint (updates live daily sales & ingredient usage)
+  function buildOrderReportSummary(orders: OrderRecord[]) {
+    let dineInCount = 0;
+    let takeawayCount = 0;
+    let pendingCount = 0;
+    let cookingCount = 0;
+    let readyCount = 0;
+    let completedCount = 0;
+    let totalOrderRevenue = 0;
+    let totalPackingCollected = 0;
+
+    for (const o of orders) {
+      if (o.orderType === 'takeaway') takeawayCount += 1;
+      else dineInCount += 1;
+
+      if (o.status === 'Menunggu Diproses') pendingCount += 1;
+      else if (o.status === 'Sedang Dimasak') cookingCount += 1;
+      else if (o.status === 'Siap Disajikan') readyCount += 1;
+      else if (o.status === 'Selesai') completedCount += 1;
+
+      totalOrderRevenue += o.totalAmount;
+      totalPackingCollected += o.packingFee;
+    }
+
+    return {
+      totalOrders: orders.length,
+      dineInCount,
+      takeawayCount,
+      pendingCount,
+      cookingCount,
+      readyCount,
+      completedCount,
+      totalOrderRevenue,
+      totalPackingCollected,
+    };
+  }
+
+  // Place customer order endpoint (generates scannable barcode & updates live daily sales/stock)
   app.post('/api/orders', (req, res) => {
     const body = req.body as {
       orderType?: OrderType;
       items?: Array<{ menuId: string; quantity: number }>;
       customerNote?: string;
+      customerName?: string;
+      tableZone?: string;
     };
 
     const orderType: OrderType =
@@ -777,22 +819,123 @@ async function startServer() {
         (dailyPortionsSold['packing-takeaway'] || 0) + 1;
     }
 
+    const seqNum = sessionOrders.length + 101;
+    const orderId = `ML-${seqNum}`;
+    const randSuffix = crypto.randomInt(1000, 9999);
+    const barcodeCode = `ML${seqNum}-${randSuffix}`;
+
+    const cleanCustomerName =
+      typeof body.customerName === 'string' && body.customerName.trim()
+        ? body.customerName.trim().slice(0, 60)
+        : undefined;
+
+    const validZone =
+      orderType === 'takeaway'
+        ? 'Takeaway / Bungkus'
+        : typeof body.tableZone === 'string' &&
+          (TABLE_ZONE_OPTIONS as readonly string[]).includes(body.tableZone)
+        ? body.tableZone
+        : 'Area Kedai (Pilihan Kasir)';
+
     const order: OrderRecord = {
-      id: `ML-${String(sessionOrders.length + 101)}`,
+      id: orderId,
+      barcodeCode,
       createdAt: new Date().toISOString(),
       orderType,
+      status: 'Menunggu Diproses',
+      customerName: cleanCustomerName,
+      tableZone: validZone,
       items: validatedItems,
       packingFee,
       totalAmount: itemsTotal + packingFee,
       hasKasirConfirmItems,
       customerNote:
-        typeof body.customerNote === 'string'
+        typeof body.customerNote === 'string' && body.customerNote.trim()
           ? body.customerNote.slice(0, 200).trim()
           : undefined,
     };
 
     sessionOrders.unshift(order);
     res.status(201).json({ order });
+  });
+
+  // Public order list & order report summary (no HPP/margin data exposed)
+  app.get('/api/orders', (req, res) => {
+    const statusParam =
+      typeof req.query.status === 'string' ? req.query.status.trim() : '';
+    const queryParam =
+      typeof req.query.q === 'string'
+        ? req.query.q.trim().toLowerCase()
+        : '';
+
+    const filtered = sessionOrders.filter((o) => {
+      const matchStatus =
+        !statusParam ||
+        statusParam === 'Semua' ||
+        o.status === statusParam;
+      const matchQuery =
+        !queryParam ||
+        o.id.toLowerCase().includes(queryParam) ||
+        o.barcodeCode.toLowerCase().includes(queryParam) ||
+        (o.customerName && o.customerName.toLowerCase().includes(queryParam));
+      return matchStatus && matchQuery;
+    });
+
+    res.json({
+      orders: filtered,
+      summary: buildOrderReportSummary(sessionOrders),
+    });
+  });
+
+  // Lookup / verify order by Barcode Code or Order ID
+  app.get('/api/orders/lookup', (req, res) => {
+    const rawCode =
+      typeof req.query.code === 'string' ? req.query.code.trim() : '';
+    if (!rawCode || rawCode.length > 60) {
+      res.status(400).json({ error: 'Masukkan kode barcode atau ID order yang valid.' });
+      return;
+    }
+
+    const normalized = rawCode.toUpperCase();
+    const found = sessionOrders.find(
+      (o) =>
+        o.barcodeCode.toUpperCase() === normalized ||
+        o.id.toUpperCase() === normalized
+    );
+
+    if (!found) {
+      res.status(404).json({
+        error: `Pesanan dengan kode barcode "${rawCode}" tidak ditemukan di sistem.`,
+      });
+      return;
+    }
+
+    res.json({ order: found });
+  });
+
+  // Update incoming order status (Kasir / Dapur / Manajemen workflow)
+  app.patch('/api/orders/:id/status', (req, res) => {
+    const targetId = String(req.params.id || '').trim().toUpperCase();
+    const body = req.body as { status?: string };
+    const nextStatus =
+      typeof body.status === 'string' ? body.status.trim() : '';
+
+    if (!ORDER_STATUS_OPTIONS.includes(nextStatus as OrderStatus)) {
+      res.status(400).json({ error: 'Status pesanan tidak valid.' });
+      return;
+    }
+
+    const order = sessionOrders.find((o) => o.id.toUpperCase() === targetId);
+    if (!order) {
+      res.status(404).json({ error: 'Nomor pesanan tidak ditemukan.' });
+      return;
+    }
+
+    order.status = nextStatus as OrderStatus;
+    res.json({
+      order,
+      summary: buildOrderReportSummary(sessionOrders),
+    });
   });
 
   // Management endpoints (Back-of-House)
@@ -805,6 +948,8 @@ async function startServer() {
       sops: KITCHEN_SOPS,
       portionsSold: dailyPortionsSold,
       recentOrders: sessionOrders.slice(0, 10),
+      orders: sessionOrders,
+      orderReportSummary: buildOrderReportSummary(sessionOrders),
     });
   });
 
@@ -1340,13 +1485,28 @@ ${confidentialBlock}`;
         voiceName: voiceProfile.voiceName,
       });
     } catch (err: unknown) {
-      const message =
+      const rawMessage =
         err instanceof Error
           ? err.message
           : 'Gagal menghasilkan suara Gemini TTS.';
-      console.error('Gemini TTS Error:', message);
+      const isQuota =
+        rawMessage.includes('429') ||
+        rawMessage.includes('RESOURCE_EXHAUSTED') ||
+        rawMessage.toLowerCase().includes('quota');
+
+      if (isQuota) {
+        console.warn('Gemini TTS quota limit reached (429).');
+        res.status(429).json({
+          quotaExceeded: true,
+          error:
+            'Kuota harian Gemini TTS Free Tier (10 permintaan/hari) sedang habis. Tunggu beberapa saat atau gunakan kunci API berbayar di panel Settings > Secrets.',
+        });
+        return;
+      }
+
+      console.error('Gemini TTS Error:', rawMessage);
       res.status(502).json({
-        error: `Gagal menghasilkan suara: ${message}`,
+        error: `Gagal menghasilkan suara: ${rawMessage}`,
       });
     }
   });
@@ -1596,13 +1756,28 @@ Pastikan giliran bicara bergantian antara Pembicara 1 dan Pembicara 2, menyebutk
         mimeType: 'audio/wav',
       });
     } catch (err: unknown) {
-      const message =
+      const rawMessage =
         err instanceof Error
           ? err.message
           : 'Gagal membuat percakapan suara restoran.';
-      console.error('Gemini Dialogue Voice Error:', message);
+      const isQuota =
+        rawMessage.includes('429') ||
+        rawMessage.includes('RESOURCE_EXHAUSTED') ||
+        rawMessage.toLowerCase().includes('quota');
+
+      if (isQuota) {
+        console.warn('Gemini Dialogue TTS quota limit reached (429).');
+        res.status(429).json({
+          quotaExceeded: true,
+          error:
+            'Kuota harian Gemini TTS Free Tier sedang habis. Tunggu beberapa saat atau gunakan kunci API berbayar di panel Settings > Secrets.',
+        });
+        return;
+      }
+
+      console.error('Gemini Dialogue Voice Error:', rawMessage);
       res.status(502).json({
-        error: `Gagal menjalankan percakapan suara: ${message}`,
+        error: `Gagal menjalankan percakapan suara: ${rawMessage}`,
       });
     }
   });

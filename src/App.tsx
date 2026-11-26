@@ -164,6 +164,7 @@ export default function App() {
           <CustomerWorkspace
             cart={cart}
             orderType={orderType}
+            refreshSignal={managementRefreshSignal}
             onOrderTypeChange={setOrderType}
             onUpdateQty={handleUpdateQty}
             onClearCart={handleClearCart}
@@ -172,7 +173,7 @@ export default function App() {
               setIncomingOrderEvent({
                 nonce: Date.now(),
                 orderType: order.orderType,
-                label: `#${order.id}`,
+                label: `#${order.id} (Barcode ${order.barcodeCode})`,
               });
             }}
             onAskAssistantAboutOrder={handleTriggerAssistant}
@@ -181,6 +182,7 @@ export default function App() {
           <ManagementWorkspace
             refreshSignal={managementRefreshSignal}
             onRequestAiAnalysis={handleTriggerAssistant}
+            onOrdersMutated={() => setManagementRefreshSignal((prev) => prev + 1)}
           />
         )}
 

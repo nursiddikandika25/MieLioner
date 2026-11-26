@@ -1,19 +1,22 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   Plus,
   Minus,
   Search,
-  CheckCircle2,
   ShoppingBag,
   Utensils,
   Flame,
   Sparkles,
   Trash2,
+  QrCode,
+  ClipboardList,
+  RefreshCw,
 } from 'lucide-react';
 import {
   MENU_CATEGORIES,
   PACKING_FEE,
   PUBLIC_MENU_ITEMS,
+  TABLE_ZONE_OPTIONS,
   type CartItem,
   type MenuCategory,
   type OrderRecord,
@@ -21,10 +24,12 @@ import {
   type PublicMenuItem,
 } from '../data/menuCatalog';
 import { formatRupiah } from '../utils/formatters';
+import { BarcodeTicketCard, getStatusTextClass } from './BarcodeTicket';
 
 interface CustomerWorkspaceProps {
   cart: CartItem[];
   orderType: OrderType;
+  refreshSignal: number;
   onOrderTypeChange: (type: OrderType) => void;
   onUpdateQty: (menuId: string, delta: number) => void;
   onClearCart: () => void;
@@ -32,9 +37,22 @@ interface CustomerWorkspaceProps {
   onAskAssistantAboutOrder: (prompt: string) => void;
 }
 
+interface OrderReportSummary {
+  totalOrders: number;
+  dineInCount: number;
+  takeawayCount: number;
+  pendingCount: number;
+  cookingCount: number;
+  readyCount: number;
+  completedCount: number;
+  totalOrderRevenue: number;
+  totalPackingCollected: number;
+}
+
 export function CustomerWorkspace({
   cart,
   orderType,
+  refreshSignal,
   onOrderTypeChange,
   onUpdateQty,
   onClearCart,
@@ -43,11 +61,42 @@ export function CustomerWorkspace({
 }: CustomerWorkspaceProps) {
   const [selectedCategory, setSelectedCategory] = useState<'Semua' | MenuCategory>('Semua');
   const [searchQuery, setSearchQuery] = useState('');
+  const [customerName, setCustomerName] = useState('');
+  const [tableZone, setTableZone] = useState<string>('');
   const [customerNote, setCustomerNote] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [confirmedOrder, setConfirmedOrder] = useState<OrderRecord | null>(null);
   const [heroImgFailed, setHeroImgFailed] = useState(false);
+
+  const [incomingOrders, setIncomingOrders] = useState<OrderRecord[]>([]);
+  const [orderSummary, setOrderSummary] = useState<OrderReportSummary | null>(null);
+  const [barcodeLookupInput, setBarcodeLookupInput] = useState('');
+  const [barcodeLookupError, setBarcodeLookupError] = useState<string | null>(null);
+  const [inspectedOrder, setInspectedOrder] = useState<OrderRecord | null>(null);
+
+  const fetchIncomingOrders = useCallback(async () => {
+    try {
+      const res = await fetch('/api/orders');
+      if (!res.ok) return;
+      const json = (await res.json()) as {
+        orders?: OrderRecord[];
+        summary?: OrderReportSummary;
+      };
+      if (Array.isArray(json.orders)) {
+        setIncomingOrders(json.orders);
+      }
+      if (json.summary) {
+        setOrderSummary(json.summary);
+      }
+    } catch {
+      // Keep current list on transient error
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchIncomingOrders();
+  }, [fetchIncomingOrders, refreshSignal]);
 
   const menuMap = useMemo(
     () => new Map(PUBLIC_MENU_ITEMS.map((item) => [item.id, item])),
@@ -190,6 +239,8 @@ export function CustomerWorkspace({
         body: JSON.stringify({
           orderType,
           items: cart,
+          customerName,
+          tableZone: orderType === 'dine-in' ? tableZone : undefined,
           customerNote,
         }),
       });
@@ -197,16 +248,40 @@ export function CustomerWorkspace({
       if (!response.ok) {
         throw new Error(data.error || 'Gagal mengonfirmasi pesanan.');
       }
-      setConfirmedOrder(data.order as OrderRecord);
-      onOrderConfirmed(data.order as OrderRecord);
+      const newOrder = data.order as OrderRecord;
+      setConfirmedOrder(newOrder);
+      setInspectedOrder(newOrder);
+      onOrderConfirmed(newOrder);
       onClearCart();
       setCustomerNote('');
+      setCustomerName('');
+      void fetchIncomingOrders();
     } catch (err: unknown) {
       setSubmitError(
         err instanceof Error ? err.message : 'Gagal mengirim pesanan.'
       );
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleLookupBarcode = async () => {
+    const code = barcodeLookupInput.trim();
+    if (!code) return;
+    setBarcodeLookupError(null);
+    try {
+      const res = await fetch(
+        `/api/orders/lookup?code=${encodeURIComponent(code)}`
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Kode barcode tidak ditemukan.');
+      }
+      setInspectedOrder(data.order as OrderRecord);
+    } catch (err: unknown) {
+      setBarcodeLookupError(
+        err instanceof Error ? err.message : 'Gagal memeriksa kode barcode.'
+      );
     }
   };
 
@@ -606,18 +681,46 @@ export function CustomerWorkspace({
               </div>
             )}
 
-            {/* Grand Total & Note */}
+            {/* Grand Total, Customer Info & Note */}
             {cartSummary.totalCount > 0 && (
-              <div className="space-y-4">
-                <input
-                  type="text"
-                  value={customerNote}
-                  onChange={(e) => setCustomerNote(e.target.value)}
-                  placeholder="Catatan tambahan (misal: tingkat pedas, es/hangat)"
-                  className="w-full px-3.5 py-2 text-xs rounded-xl border border-stone-300 bg-white text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:border-orange-600"
-                />
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 gap-2.5">
+                  <input
+                    type="text"
+                    value={customerName}
+                    onChange={(e) => setCustomerName(e.target.value)}
+                    placeholder="Nama pemesan (opsional, misal: Kak Rina)"
+                    maxLength={60}
+                    className="w-full px-3.5 py-2 text-xs rounded-xl border border-stone-300 bg-white text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:border-orange-600"
+                  />
 
-                <div className="flex items-baseline justify-between">
+                  {orderType === 'dine-in' && (
+                    <select
+                      aria-label="Pilih area tempat duduk"
+                      value={tableZone}
+                      onChange={(e) => setTableZone(e.target.value)}
+                      className="w-full px-3.5 py-2 text-xs rounded-xl border border-stone-300 bg-white text-zinc-900 focus:outline-none focus:border-orange-600"
+                    >
+                      <option value="">Area Tempat Duduk: Pilihan Kasir</option>
+                      {TABLE_ZONE_OPTIONS.map((z) => (
+                        <option key={z} value={z}>
+                          Area: {z}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  <input
+                    type="text"
+                    value={customerNote}
+                    onChange={(e) => setCustomerNote(e.target.value)}
+                    placeholder="Catatan tambahan (misal: tingkat pedas, es/hangat)"
+                    maxLength={200}
+                    className="w-full px-3.5 py-2 text-xs rounded-xl border border-stone-300 bg-white text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:border-orange-600"
+                  />
+                </div>
+
+                <div className="flex items-baseline justify-between pt-1">
                   <span className="text-sm font-semibold text-zinc-700">
                     Total Estimasi
                   </span>
@@ -645,7 +748,9 @@ export function CustomerWorkspace({
                     onClick={() => void handleConfirmOrder()}
                     className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-orange-600 text-white text-sm font-semibold hover:bg-orange-700 transition-colors disabled:opacity-50 cursor-pointer"
                   >
-                    {isSubmitting ? 'Memproses Pesanan...' : 'Konfirmasi Pesanan'}
+                    {isSubmitting
+                      ? 'Menerbitkan Barcode Pesanan...'
+                      : 'Konfirmasi & Terima Barcode'}
                   </button>
                   <button
                     type="button"
@@ -667,37 +772,196 @@ export function CustomerWorkspace({
               </div>
             )}
 
-            {/* Post-Order Verification Receipt */}
+            {/* Post-Order Confirmation & Scannable Barcode Ticket */}
             {confirmedOrder && (
-              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-2">
-                <div className="flex items-center gap-2 text-emerald-800 font-semibold text-sm">
-                  <CheckCircle2 className="w-4 h-4 shrink-0" />
-                  <span>Pesanan #{confirmedOrder.id} Diterima</span>
-                </div>
-                <p className="text-xs text-emerald-900">
-                  Tipe:{' '}
-                  {confirmedOrder.orderType === 'takeaway'
-                    ? 'Dibungkus (Takeaway)'
-                    : 'Makan di Tempat (Dine-in)'}{' '}
-                  · Total:{' '}
-                  <span className="font-mono tabular-nums font-semibold">
-                    {formatRupiah(confirmedOrder.totalAmount)}
-                  </span>
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-emerald-800">
+                  Pesanan terkonfirmasi masuk ke sistem &amp; kode barcode diterbitkan:
                 </p>
-                <ul className="text-xs text-emerald-900 space-y-0.5 pt-1">
-                  {confirmedOrder.items.map((it) => (
-                    <li key={it.menuId}>
-                      • {it.quantity}x {it.name}
-                    </li>
-                  ))}
-                  {confirmedOrder.packingFee > 0 && (
-                    <li>• Biaya Packing: {formatRupiah(confirmedOrder.packingFee)}</li>
-                  )}
-                </ul>
+                <BarcodeTicketCard order={confirmedOrder} />
               </div>
             )}
           </div>
         </aside>
+      </section>
+
+      {/* Incoming Orders & Barcode Ticket Report System */}
+      <section
+        id="laporan-order-masuk"
+        className="bg-white border border-stone-200 rounded-2xl overflow-hidden"
+      >
+        <div className="px-6 py-5 border-b border-stone-200 bg-stone-50/70 flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="font-display text-xl font-bold text-zinc-900 flex items-center gap-2">
+              <ClipboardList className="w-5 h-5 text-orange-600" />
+              <span>Data Order Masuk &amp; Laporan Tiket Barcode</span>
+            </h2>
+            <p className="text-sm text-zinc-600 mt-0.5">
+              Setiap pesanan terkonfirmasi dari menu otomatis tercatat di laporan order dan dapat diverifikasi dengan kode barcode.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1.5">
+              <input
+                type="text"
+                value={barcodeLookupInput}
+                onChange={(e) => setBarcodeLookupInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void handleLookupBarcode();
+                  }
+                }}
+                placeholder="Cek kode barcode (misal ML101-xxxx)"
+                className="min-h-[38px] px-3 py-1.5 text-xs rounded-lg border border-stone-300 bg-white text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:border-orange-600"
+              />
+              <button
+                type="button"
+                onClick={() => void handleLookupBarcode()}
+                className="min-h-[38px] px-3 py-1.5 rounded-lg bg-zinc-900 text-white text-xs font-semibold hover:bg-zinc-800 inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+              >
+                <QrCode className="w-3.5 h-3.5" />
+                <span>Cek Barcode</span>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => void fetchIncomingOrders()}
+              className="min-h-[38px] px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-semibold text-zinc-700 hover:bg-stone-50 inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Segarkan</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="p-6 space-y-6">
+          {barcodeLookupError && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs">
+              {barcodeLookupError}
+            </div>
+          )}
+
+          {orderSummary && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="border border-stone-200 rounded-xl p-4 bg-stone-50/50">
+                <p className="text-xs text-zinc-500">Order Masuk Sesi Ini</p>
+                <p className="font-mono tabular-nums text-xl font-bold text-zinc-900 mt-1">
+                  {orderSummary.totalOrders} Order
+                </p>
+              </div>
+              <div className="border border-stone-200 rounded-xl p-4 bg-stone-50/50">
+                <p className="text-xs text-zinc-500">Dine-in / Takeaway</p>
+                <p className="font-mono tabular-nums text-xl font-bold text-zinc-900 mt-1">
+                  {orderSummary.dineInCount} / {orderSummary.takeawayCount}
+                </p>
+              </div>
+              <div className="border border-stone-200 rounded-xl p-4 bg-stone-50/50">
+                <p className="text-xs text-zinc-500">Sedang Diproses / Siap</p>
+                <p className="font-mono tabular-nums text-xl font-bold text-orange-700 mt-1">
+                  {orderSummary.pendingCount + orderSummary.cookingCount} /{' '}
+                  {orderSummary.readyCount}
+                </p>
+              </div>
+              <div className="border border-stone-200 rounded-xl p-4 bg-stone-50/50">
+                <p className="text-xs text-zinc-500">Total Nilai Order</p>
+                <p className="font-mono tabular-nums text-xl font-bold text-emerald-700 mt-1">
+                  {formatRupiah(orderSummary.totalOrderRevenue)}
+                </p>
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            <div className="lg:col-span-8 overflow-x-auto border border-stone-200 rounded-xl">
+              {incomingOrders.length === 0 ? (
+                <div className="p-8 text-center text-sm text-zinc-500">
+                  Belum ada pesanan masuk di sesi ini. Pilih menu di atas lalu klik <strong className="text-zinc-800">Konfirmasi &amp; Terima Barcode</strong> untuk mencatat pesanan pertama.
+                </div>
+              ) : (
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-stone-50 border-b border-stone-200 text-xs font-semibold text-zinc-600">
+                      <th className="py-3 px-4">Order &amp; Barcode</th>
+                      <th className="py-3 px-4">Pemesan &amp; Tipe</th>
+                      <th className="py-3 px-4">Daftar Menu</th>
+                      <th className="py-3 px-4 text-right">Total</th>
+                      <th className="py-3 px-4">Status</th>
+                      <th className="py-3 px-4 text-right">Tiket</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100 text-xs">
+                    {incomingOrders.map((ord) => (
+                      <tr
+                        key={ord.id}
+                        className={`hover:bg-stone-50/80 ${
+                          inspectedOrder?.id === ord.id ? 'bg-orange-50/40' : ''
+                        }`}
+                      >
+                        <td className="py-3 px-4">
+                          <span className="font-mono font-bold text-zinc-900 block">
+                            #{ord.id}
+                          </span>
+                          <span className="font-mono text-[11px] text-zinc-600">
+                            {ord.barcodeCode}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4">
+                          <span className="font-medium text-zinc-900 block">
+                            {ord.customerName || 'Pelanggan'}
+                          </span>
+                          <span className="text-zinc-500">
+                            {ord.orderType === 'takeaway'
+                              ? 'Takeaway (+Packing)'
+                              : ord.tableZone || 'Dine-in'}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-zinc-700 max-w-[240px]">
+                          {ord.items
+                            .map((i) => `${i.quantity}x ${i.name}`)
+                            .join(', ')}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-zinc-900">
+                          {formatRupiah(ord.totalAmount)}
+                        </td>
+                        <td className="py-3 px-4">
+                          <span
+                            className={`inline-block px-2 py-0.5 rounded-md border font-semibold whitespace-nowrap ${getStatusTextClass(
+                              ord.status
+                            )}`}
+                          >
+                            {ord.status}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <button
+                            type="button"
+                            onClick={() => setInspectedOrder(ord)}
+                            className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white hover:border-orange-500 hover:text-orange-700 font-semibold whitespace-nowrap cursor-pointer"
+                          >
+                            Lihat Barcode
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div className="lg:col-span-4">
+              {inspectedOrder ? (
+                <BarcodeTicketCard order={inspectedOrder} compact />
+              ) : (
+                <div className="border border-dashed border-stone-300 rounded-xl p-6 text-center text-xs text-zinc-500 bg-stone-50/60">
+                  Tiket barcode pesanan akan tampil di sini setelah Anda mengonfirmasi pesanan atau memilih salah satu order masuk.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       </section>
     </div>
   );

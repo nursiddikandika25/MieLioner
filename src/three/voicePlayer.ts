@@ -32,6 +32,22 @@ export interface LiveDialogueResponse {
   mimeType: string;
 }
 
+const CHARACTER_SPEECH_TUNING: Record<
+  VoiceSpeakerId,
+  { pitch: number; rate: number }
+> = {
+  'raka-manager': { pitch: 0.9, rate: 0.98 },
+  'sinta-kasir': { pitch: 1.15, rate: 1.05 },
+  'dimas-chef': { pitch: 0.85, rate: 1.06 },
+  'nadia-snack-bar': { pitch: 1.18, rate: 1.06 },
+  'bima-server': { pitch: 1.02, rate: 1.04 },
+  'tania-inventory': { pitch: 1.1, rate: 1.0 },
+  'all-team': { pitch: 0.95, rate: 1.0 },
+  'visitor-male': { pitch: 0.96, rate: 1.04 },
+  'visitor-female': { pitch: 1.2, rate: 1.04 },
+  visitor: { pitch: 1.0, rate: 1.04 },
+};
+
 class RestaurantVoicePlayer {
   private currentAudio: HTMLAudioElement | null = null;
   private queue: Array<{
@@ -64,7 +80,11 @@ class RestaurantVoicePlayer {
   }
 
   public isPlaying(): boolean {
-    return this.playing;
+    const synthSpeaking =
+      typeof window !== 'undefined' &&
+      'speechSynthesis' in window &&
+      window.speechSynthesis.speaking;
+    return this.playing || synthSpeaking;
   }
 
   public stopAll() {
@@ -78,8 +98,46 @@ class RestaurantVoicePlayer {
       }
       this.currentAudio = null;
     }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // ignore
+      }
+    }
     this.playing = false;
     this.notify();
+  }
+
+  // Zero-quota Indonesian Web Speech API voice for passive live restaurant ambient chatter
+  public speakAmbientBrowserVoice(text: string, speakerId: VoiceSpeakerId) {
+    if (!this.voiceEnabled) return;
+    if (this.playing) return;
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    if (window.speechSynthesis.speaking) return;
+
+    const clean = text.replace(/\s+/g, ' ').trim().slice(0, 180);
+    if (!clean) return;
+
+    try {
+      const utter = new SpeechSynthesisUtterance(clean);
+      const voices = window.speechSynthesis.getVoices();
+      const idVoice =
+        voices.find((v) => v.lang.toLowerCase().startsWith('id')) ||
+        voices.find((v) => v.lang.toLowerCase().includes('id'));
+      if (idVoice) {
+        utter.voice = idVoice;
+      }
+      utter.lang = 'id-ID';
+      const tuning =
+        CHARACTER_SPEECH_TUNING[speakerId] ?? CHARACTER_SPEECH_TUNING.visitor;
+      utter.pitch = tuning.pitch;
+      utter.rate = tuning.rate;
+      utter.volume = 0.72;
+      window.speechSynthesis.speak(utter);
+    } catch {
+      // Ignore browser speech synthesis failures quietly
+    }
   }
 
   public enqueueWav(
@@ -89,8 +147,13 @@ class RestaurantVoicePlayer {
     if (!base64) return;
     if (opts?.interrupt) {
       this.stopAll();
+    } else if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // ignore
+      }
     }
-    // Keep queue short so live background chatter doesn't lag behind
     if (this.queue.length >= 2) {
       this.queue.shift();
     }
@@ -138,11 +201,22 @@ class RestaurantVoicePlayer {
 
 export const voicePlayer = new RestaurantVoicePlayer();
 
+const clientTtsCache = new Map<
+  string,
+  { audioBase64: string; mimeType: string; voiceName: string }
+>();
+
 export async function fetchSingleSpeakerTts(params: {
   text: string;
   speakerId: VoiceSpeakerId;
   style?: string;
 }): Promise<{ audioBase64: string; mimeType: string; voiceName: string }> {
+  const cacheKey = `${params.speakerId}|${params.text.trim()}`;
+  const cached = clientTtsCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const res = await fetch('/api/voice/tts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -152,7 +226,17 @@ export async function fetchSingleSpeakerTts(params: {
   if (!res.ok) {
     throw new Error(json.error || 'Gagal memuat suara Gemini TTS.');
   }
-  return json as { audioBase64: string; mimeType: string; voiceName: string };
+  const result = json as {
+    audioBase64: string;
+    mimeType: string;
+    voiceName: string;
+  };
+  if (clientTtsCache.size >= 40) {
+    const oldest = clientTtsCache.keys().next().value;
+    if (oldest) clientTtsCache.delete(oldest);
+  }
+  clientTtsCache.set(cacheKey, result);
+  return result;
 }
 
 export async function fetchLiveDialogue(params: {
