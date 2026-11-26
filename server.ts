@@ -17,6 +17,7 @@ import {
 } from './src/data/menuCatalog.ts';
 import {
   AI_STAFF_PROFILES,
+  type AiStaffProfile,
   type StaffId,
 } from './src/data/restaurantStaff.ts';
 
@@ -1091,7 +1092,22 @@ async function startServer() {
     }
   });
 
-  // Virtual Restaurant AI Staff Status & Jobdesk Execution
+  // Virtual Restaurant AI Staff Status, Editable Names & Jobdesk Execution
+  const customStaffNames: Partial<Record<StaffId, string>> = {};
+
+  function getResolvedStaffProfiles(): AiStaffProfile[] {
+    return AI_STAFF_PROFILES.map((staff) => ({
+      ...staff,
+      name: customStaffNames[staff.id] || staff.name,
+    }));
+  }
+
+  function getResolvedStaffName(id: StaffId): string {
+    const custom = customStaffNames[id];
+    if (custom) return custom;
+    return AI_STAFF_PROFILES.find((s) => s.id === id)?.name || id;
+  }
+
   const staffExecutionLogs: Array<{
     id: string;
     staffId: StaffId | 'all-team';
@@ -1120,7 +1136,53 @@ async function startServer() {
       activeOrdersCount: sessionOrders.length,
       recentOrders: sessionOrders.slice(0, 5),
       logs: staffExecutionLogs.slice(0, 15),
+      staffProfiles: getResolvedStaffProfiles(),
     });
+  });
+
+  app.patch('/api/staff/:id', (req, res) => {
+    const rawId = String(req.params.id || '').trim() as StaffId;
+    const baseProfile = AI_STAFF_PROFILES.find((s) => s.id === rawId);
+    if (!baseProfile) {
+      res.status(404).json({ error: 'Data pegawai tidak ditemukan.' });
+      return;
+    }
+
+    const body = req.body as { name?: unknown; reset?: boolean };
+    if (body.reset === true) {
+      delete customStaffNames[rawId];
+      const updated = getResolvedStaffProfiles();
+      const staff = updated.find((s) => s.id === rawId)!;
+      res.json({ staff, staffProfiles: updated });
+      return;
+    }
+
+    if (typeof body.name !== 'string') {
+      res.status(400).json({ error: 'Nama pegawai harus berupa teks.' });
+      return;
+    }
+
+    const cleanedName = body.name
+      .replace(/[\u0000-\u001F\u007F<>]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (cleanedName.length < 2 || cleanedName.length > 50) {
+      res.status(400).json({
+        error: 'Nama pegawai harus terdiri dari 2 hingga 50 karakter.',
+      });
+      return;
+    }
+
+    if (cleanedName === baseProfile.name) {
+      delete customStaffNames[rawId];
+    } else {
+      customStaffNames[rawId] = cleanedName;
+    }
+
+    const updated = getResolvedStaffProfiles();
+    const staff = updated.find((s) => s.id === rawId)!;
+    res.json({ staff, staffProfiles: updated });
   });
 
   app.post('/api/staff/execute', async (req, res) => {
@@ -1140,10 +1202,11 @@ async function startServer() {
     const activeMode: AppMode =
       body.mode === 'management' ? 'management' : 'customer';
 
+    const resolvedProfiles = getResolvedStaffProfiles();
     const staffProfile =
       body.staffId === 'all-team'
         ? null
-        : AI_STAFF_PROFILES.find((s) => s.id === body.staffId);
+        : resolvedProfiles.find((s) => s.id === body.staffId);
 
     if (body.staffId !== 'all-team' && !staffProfile) {
       res.status(400).json({ error: 'Karyawan AI yang dipilih tidak valid.' });
@@ -1221,7 +1284,9 @@ async function startServer() {
         ? `Anda adalah ${staffProfile.name}, bertugas sebagai ${staffProfile.role} di kedai mie "MieLioner" (Station: ${staffProfile.zoneName}).\nTanggung jawab utama Anda:\n${staffProfile.jobdeskPoints
             .map((j) => `- ${j}`)
             .join('\n')}`
-        : `Anda adalah Koordinator Briefing Tim "MieLioner" yang merangkum laporan eksekusi profesional dari 6 karyawan AI: Raka Pratama (Kepala Restoran), Sinta Maharani (Kasir), Chef Dimas Wijaya (Koki Mie & Hot Maks), Nadia Putri (Bar Minuman & Cemilan Dayang), Bima Kusuma (Pramusaji), dan Tania Lestari (Gudang & Packing).`;
+        : `Anda adalah Koordinator Briefing Tim "MieLioner" yang merangkum laporan eksekusi profesional dari 6 karyawan AI: ${resolvedProfiles
+            .map((p) => `${p.name} (${p.shortTitle})`)
+            .join(', ')}.`;
 
       const staffSystemInstruction = `${personaHeader}
 
@@ -1549,6 +1614,13 @@ ${confidentialBlock}`;
         ? scenarioPool[Math.floor(Math.random() * scenarioPool.length)]
         : (requestedScenario as Exclude<DialogueScenario, 'random'>);
 
+    const rakaName = getResolvedStaffName('raka-manager');
+    const sintaName = getResolvedStaffName('sinta-kasir');
+    const dimasName = getResolvedStaffName('dimas-chef');
+    const nadiaName = getResolvedStaffName('nadia-snack-bar');
+    const bimaName = getResolvedStaffName('bima-server');
+    const taniaName = getResolvedStaffName('tania-inventory');
+
     const scenarioConfigs: Record<
       Exclude<DialogueScenario, 'random'>,
       {
@@ -1561,55 +1633,60 @@ ${confidentialBlock}`;
       }
     > = {
       order_kasir: {
-        title: 'Kasir Sinta & Pengunjung',
+        title: `Kasir ${sintaName} & Pengunjung`,
         speakerA: 'visitor',
         speakerB: 'sinta-kasir',
         voiceA: 'Puck',
         voiceB: 'Kore',
-        promptGoal:
-          'Percakapan hangat di Meja Kasir saat pengunjung baru datang memesan Mie Lioner (Polos atau Hot Maks). Sinta menyapa dengan "Kak", menawarkan topping Telor Goreng (Rp 5.000) atau Keju Leleh (Rp 6.000) serta minuman Te\' Manis / Creamy Latte (Rp 5.000), dan menanyakan makan di tempat atau dibungkus (+Packing Rp 1.000).',
+        promptGoal: `Percakapan hangat di Meja Kasir saat pengunjung baru datang memesan Mie Lioner (Polos atau Hot Maks). ${sintaName} menyapa dengan "Kak", menawarkan topping Telor Goreng (Rp 5.000) atau Keju Leleh (Rp 6.000) serta minuman Te' Manis / Creamy Latte (Rp 5.000), dan menanyakan makan di tempat atau dibungkus (+Packing Rp 1.000).`,
       },
       kitchen_prep: {
-        title: 'Kasir Sinta & Chef Dimas',
+        title: `Kasir ${sintaName} & ${dimasName}`,
         speakerA: 'sinta-kasir',
         speakerB: 'dimas-chef',
         voiceA: 'Kore',
         voiceB: 'Fenrir',
-        promptGoal:
-          'Koordinasi sigap antara Kasir Sinta yang meneruskan pesanan baru Mie Lioner Hot Maks Double & Polos Goreng ke Chef Dimas di Dapur Produksi. Chef Dimas mengonfirmasi takaran sambal Hot Maks (15 ml Single / 25 ml Double) dan keju siap masak sesuai SOP.',
+        promptGoal: `Koordinasi sigap antara Kasir ${sintaName} yang meneruskan pesanan baru Mie Lioner Hot Maks Double & Polos Goreng ke ${dimasName} di Dapur Produksi. ${dimasName} mengonfirmasi takaran sambal Hot Maks (15 ml Single / 25 ml Double) dan keju siap masak sesuai SOP.`,
       },
       snack_bar_sync: {
-        title: 'Bar Nadia & Pramusaji Bima',
+        title: `Bar ${nadiaName} & Pramusaji ${bimaName}`,
         speakerA: 'nadia-snack-bar',
         speakerB: 'bima-server',
         voiceA: 'Zephyr',
         voiceB: 'Puck',
-        promptGoal:
-          'Percakapan cepat penuh semangat di Bar Minuman antara Nadia Putri yang baru mengangkat Kentang Goreng 200gr & Otak-Otak Goreng serta meracik Te\' Manis / Creamy Latte, dan Bima Kusuma yang siap mengantarkan ke meja Booth Timber atau Mezzanine.',
+        promptGoal: `Percakapan cepat penuh semangat di Bar Minuman antara ${nadiaName} yang baru mengangkat Kentang Goreng 200gr & Otak-Otak Goreng serta meracik Te' Manis / Creamy Latte, dan ${bimaName} yang siap mengantarkan ke meja Booth Timber atau Mezzanine.`,
       },
       table_service: {
-        title: 'Pramusaji Bima & Pengunjung Meja',
+        title: `Pramusaji ${bimaName} & Pengunjung Meja`,
         speakerA: 'bima-server',
         speakerB: 'visitor-female',
         voiceA: 'Puck',
         voiceB: 'Zephyr',
-        promptGoal:
-          'Bima mengantarkan MieLioner hangat ke meja pengunjung di Booth Timber / Teras Outdoor dengan ramah, menanyakan apakah ada tambahan topping atau minuman, dan pengunjung memuji aroma mie dan pelayanan cepat kedai.',
+        promptGoal: `${bimaName} mengantarkan MieLioner hangat ke meja pengunjung di Booth Timber / Teras Outdoor dengan ramah, menanyakan apakah ada tambahan topping atau minuman, dan pengunjung memuji aroma mie dan pelayanan cepat kedai.`,
       },
       warehouse_sync: {
-        title: 'Kepala Restoran Raka & Gudang Tania',
+        title: `Kepala Restoran ${rakaName} & Gudang ${taniaName}`,
         speakerA: 'raka-manager',
         speakerB: 'tania-inventory',
         voiceA: 'Charon',
         voiceB: 'Kore',
-        promptGoal:
-          'Koordinasi operasional antara Kepala Restoran Raka Pratama dan Petugas Gudang Tania Lestari mengenai kesiapan stok Keju Cheddar Parut, Jagung Popcorn, Kentang Beku 200gr, dan kemasan Takeaway (+Rp 1.000/set).',
+        promptGoal: `Koordinasi operasional antara Kepala Restoran ${rakaName} dan Petugas Gudang ${taniaName} mengenai kesiapan stok Keju Cheddar Parut, Jagung Popcorn, Kentang Beku 200gr, dan kemasan Takeaway (+Rp 1.000/set).`,
       },
     };
 
     const cfg = scenarioConfigs[chosenScenario];
-    const profA = SPEAKER_VOICE_MAP[cfg.speakerA];
-    const profB = SPEAKER_VOICE_MAP[cfg.speakerB];
+    const resolveVoiceSpeaker = (sid: VoiceSpeakerId) => {
+      const base = SPEAKER_VOICE_MAP[sid];
+      if (sid in customStaffNames || AI_STAFF_PROFILES.some((s) => s.id === sid)) {
+        return {
+          ...base,
+          displayName: getResolvedStaffName(sid as StaffId),
+        };
+      }
+      return base;
+    };
+    const profA = resolveVoiceSpeaker(cfg.speakerA);
+    const profB = resolveVoiceSpeaker(cfg.speakerB);
 
     const customCtx =
       typeof body.customContext === 'string' && body.customContext.trim()

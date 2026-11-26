@@ -15,7 +15,11 @@ import {
   MessageSquareText,
 } from 'lucide-react';
 import type { AppMode, OrderType } from '../data/menuCatalog';
-import { AI_STAFF_PROFILES, type StaffId } from '../data/restaurantStaff';
+import {
+  AI_STAFF_PROFILES,
+  type AiStaffProfile,
+  type StaffId,
+} from '../data/restaurantStaff';
 import {
   buildArticulatedCharacter,
   getStaffStyleConfig,
@@ -69,6 +73,7 @@ export interface ExternalSpeechEvent {
 interface RestaurantSimulator3DProps {
   mode: AppMode;
   selectedStaffId: StaffId;
+  staffProfiles?: AiStaffProfile[];
   onSelectStaff: (staffId: StaffId) => void;
   incomingOrderEvent?: IncomingOrderSimEvent | null;
   staffCommandEvent?: StaffCommandSimEvent | null;
@@ -274,6 +279,7 @@ function setCharacterSitPose(char: ArticulatedCharacter, seated: boolean) {
 export function RestaurantSimulator3D({
   mode: _mode,
   selectedStaffId,
+  staffProfiles,
   onSelectStaff,
   incomingOrderEvent,
   staffCommandEvent,
@@ -282,17 +288,28 @@ export function RestaurantSimulator3D({
   onTriggerLiveDialogue,
   isDialogueLoading = false,
 }: RestaurantSimulator3DProps) {
+  const resolvedStaffProfiles =
+    staffProfiles && staffProfiles.length > 0
+      ? staffProfiles
+      : AI_STAFF_PROFILES;
+
   const mountRef = useRef<HTMLDivElement | null>(null);
   const labelRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const staffBubbleRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const visitorBubbleRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
   const selectedStaffRef = useRef<StaffId>(selectedStaffId);
+  const staffProfilesRef = useRef<AiStaffProfile[]>(resolvedStaffProfiles);
   const onSelectStaffRef = useRef(onSelectStaff);
   const onConversationRef = useRef(onConversationMessage);
   selectedStaffRef.current = selectedStaffId;
+  staffProfilesRef.current = resolvedStaffProfiles;
   onSelectStaffRef.current = onSelectStaff;
   onConversationRef.current = onConversationMessage;
+
+  const getStaffMeta = (id: StaffId): AiStaffProfile =>
+    staffProfilesRef.current.find((p) => p.id === id) ||
+    AI_STAFF_PROFILES.find((p) => p.id === id)!;
 
   const [isPaused, setIsPaused] = useState(false);
   const isPausedRef = useRef(false);
@@ -668,7 +685,10 @@ export function RestaurantSimulator3D({
         });
       });
 
-      spawnVisitor('dine-in', 'Pengunjung baru menuju Meja Kasir Sinta Maharani');
+      spawnVisitor(
+        'dine-in',
+        `Pengunjung baru menuju Meja Kasir ${getStaffMeta('sinta-kasir').name}`
+      );
     };
     seedInitialGuests();
 
@@ -696,13 +716,11 @@ export function RestaurantSimulator3D({
           onSelectStaffRef.current(hitStaffId);
           triggerStaffActionRef.current[hitStaffId] = 2.5;
           restaurantSound.playStaffAck();
-          const profile = AI_STAFF_PROFILES.find((p) => p.id === hitStaffId);
-          if (profile) {
-            setLiveStats((prev) => ({
-              ...prev,
-              statusBanner: `Terpilih: ${profile.name} (${profile.shortTitle})`,
-            }));
-          }
+          const profile = getStaffMeta(hitStaffId);
+          setLiveStats((prev) => ({
+            ...prev,
+            statusBanner: `Terpilih: ${profile.name} (${profile.shortTitle})`,
+          }));
         }
       }
     };
@@ -989,41 +1007,45 @@ export function RestaurantSimulator3D({
         ambientStaffCycleIdx += 1;
 
         if (cycle === 0) {
+          const prof = getStaffMeta('raka-manager');
           activateSpeechLine({
             delay: 0,
             speakerId: 'raka-manager',
-            speakerName: 'Raka Pratama',
-            speakerRole: 'Kepala Restoran',
+            speakerName: prof.name,
+            speakerRole: prof.shortTitle,
             text: pickRandom(RAKA_MANAGER_LINES),
             duration: 4.5,
             allowTts: true,
           });
         } else if (cycle === 1) {
+          const prof = getStaffMeta('nadia-snack-bar');
           activateSpeechLine({
             delay: 0,
             speakerId: 'nadia-snack-bar',
-            speakerName: 'Nadia Putri',
-            speakerRole: 'Bar & Cemilan Dayang',
+            speakerName: prof.name,
+            speakerRole: prof.shortTitle,
             text: pickRandom(NADIA_BAR_LINES),
             duration: 4.5,
             allowTts: true,
           });
         } else if (cycle === 2) {
+          const prof = getStaffMeta('tania-inventory');
           activateSpeechLine({
             delay: 0,
             speakerId: 'tania-inventory',
-            speakerName: 'Tania Lestari',
-            speakerRole: 'Gudang, Stok & Packing',
+            speakerName: prof.name,
+            speakerRole: prof.shortTitle,
             text: pickRandom(TANIA_GUDANG_LINES),
             duration: 4.5,
             allowTts: true,
           });
         } else {
+          const prof = getStaffMeta('dimas-chef');
           activateSpeechLine({
             delay: 0,
             speakerId: 'dimas-chef',
-            speakerName: 'Chef Dimas Wijaya',
-            speakerRole: 'Koki Mie & Hot Maks',
+            speakerName: prof.name,
+            speakerRole: prof.shortTitle,
             text: pickRandom(CHEF_DIMAS_LINES),
             duration: 4.5,
             allowTts: true,
@@ -1168,11 +1190,12 @@ export function RestaurantSimulator3D({
               visitorId: v.id,
               allowTts: true,
             });
+            const sintaMeta = getStaffMeta('sinta-kasir');
             scheduledLines.push({
               delay: 1.35,
               speakerId: 'sinta-kasir',
-              speakerName: 'Sinta Maharani',
-              speakerRole: 'Kasir & Frontliner',
+              speakerName: sintaMeta.name,
+              speakerRole: sintaMeta.shortTitle,
               text: kasirReply,
               duration: 4.0,
               allowTts: true,
@@ -1188,11 +1211,12 @@ export function RestaurantSimulator3D({
               triggerStaffActionRef.current['tania-inventory'] = 2.8;
               triggerStaffActionRef.current['dimas-chef'] = 2.8;
               restaurantSound.playKitchenSizzle();
+              const taniaMeta = getStaffMeta('tania-inventory');
               scheduledLines.push({
                 delay: 0.4,
                 speakerId: 'tania-inventory',
-                speakerName: 'Tania Lestari',
-                speakerRole: 'Gudang, Stok & Packing',
+                speakerName: taniaMeta.name,
+                speakerRole: taniaMeta.shortTitle,
                 text: 'Pesanan Takeaway siap dikemas! Box dan alat makan lengkap ya.',
                 duration: 4.0,
                 source: 'sim',
@@ -1207,11 +1231,12 @@ export function RestaurantSimulator3D({
                 triggerStaffActionRef.current['dimas-chef'] = 4.0;
                 triggerStaffActionRef.current['nadia-snack-bar'] = 3.0;
                 restaurantSound.playKitchenSizzle();
+                const dimasMeta = getStaffMeta('dimas-chef');
                 scheduledLines.push({
                   delay: 0.6,
                   speakerId: 'dimas-chef',
-                  speakerName: 'Chef Dimas Wijaya',
-                  speakerRole: 'Koki Mie & Hot Maks',
+                  speakerName: dimasMeta.name,
+                  speakerRole: dimasMeta.shortTitle,
                   text: pickRandom(CHEF_DIMAS_LINES),
                   duration: 4.0,
                   source: 'sim',
@@ -1252,11 +1277,11 @@ export function RestaurantSimulator3D({
                 layout.entrancePos.clone(),
               ];
               v.phase = 'leaving';
+              const taniaFirst = getStaffMeta('tania-inventory').name.split(' ')[0];
               setLiveStats((prev) => ({
                 ...prev,
                 ordersServed: servedCount,
-                statusBanner:
-                  'Takeaway selesai dikemas Tania (+Packing Rp 1.000)',
+                statusBanner: `Takeaway selesai dikemas ${taniaFirst} (+Packing Rp 1.000)`,
               }));
             }
           }
@@ -1362,11 +1387,12 @@ export function RestaurantSimulator3D({
             restaurantSound.playServeBell();
 
             const servedVisitor = bimaTargetVisitor;
+            const bimaMeta = getStaffMeta('bima-server');
             activateSpeechLine({
               delay: 0,
               speakerId: 'bima-server',
-              speakerName: 'Bima Kusuma',
-              speakerRole: 'Pramusaji Area Makan',
+              speakerName: bimaMeta.name,
+              speakerRole: bimaMeta.shortTitle,
               text: pickRandom(BIMA_SERVE_LINES),
               duration: 3.8,
               allowTts: true,
@@ -1383,10 +1409,11 @@ export function RestaurantSimulator3D({
               source: 'sim',
             });
 
+            const bimaFirst = bimaMeta.name.split(' ')[0];
             setLiveStats((prev) => ({
               ...prev,
               ordersServed: servedCount,
-              statusBanner: `Bima mengantar MieLioner ke ${bimaTargetVisitor?.targetSeat?.zoneName}`,
+              statusBanner: `${bimaFirst} mengantar MieLioner ke ${bimaTargetVisitor?.targetSeat?.zoneName}`,
             }));
             bimaTargetVisitor = null;
             bimaState = 'returning_to_post';
@@ -1554,7 +1581,7 @@ export function RestaurantSimulator3D({
 
       {/* 3D-Projected Floating Nameplates & Live Speech Bubbles for All Staff + Visitors */}
       <div className="pointer-events-none absolute inset-0 overflow-hidden z-10">
-        {AI_STAFF_PROFILES.map((staff) => {
+        {resolvedStaffProfiles.map((staff) => {
           const isSelected = staff.id === selectedStaffId;
           return (
             <div key={staff.id}>

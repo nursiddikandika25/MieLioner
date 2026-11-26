@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type FormEvent } from 'react';
+import { useState, useEffect, useCallback, useMemo, type FormEvent } from 'react';
 import {
   Briefcase,
   Receipt,
@@ -14,6 +14,10 @@ import {
   MessageSquareText,
   Volume2,
   Square,
+  Pencil,
+  Check,
+  X,
+  RotateCcw,
 } from 'lucide-react';
 import type { AppMode } from '../data/menuCatalog';
 import {
@@ -52,17 +56,10 @@ interface VirtualRestaurantProps {
   incomingOrderEvent?: IncomingOrderSimEvent | null;
 }
 
-const DIALOGUE_SCENARIOS: Array<{
-  id: DialogueScenario;
-  label: string;
-}> = [
-  { id: 'random', label: 'Acak (Semua Tim)' },
-  { id: 'order_kasir', label: 'Kasir Sinta ↔ Pengunjung' },
-  { id: 'kitchen_prep', label: 'Kasir ↔ Chef Dimas' },
-  { id: 'snack_bar_sync', label: 'Bar Nadia ↔ Bima' },
-  { id: 'table_service', label: 'Bima ↔ Tamu Meja' },
-  { id: 'warehouse_sync', label: 'Raka ↔ Gudang Tania' },
-];
+function getFirstName(fullName: string): string {
+  const parts = fullName.trim().split(/\s+/);
+  return parts[0] || fullName;
+}
 
 const INITIAL_CONVERSATIONS: ConversationMessage[] = [
   {
@@ -155,8 +152,18 @@ export function VirtualRestaurant({
   refreshSignal,
   incomingOrderEvent,
 }: VirtualRestaurantProps) {
+  const [staffProfiles, setStaffProfiles] =
+    useState<AiStaffProfile[]>(AI_STAFF_PROFILES);
   const [selectedStaffId, setSelectedStaffId] =
     useState<StaffId>('sinta-kasir');
+  const [editingTarget, setEditingTarget] = useState<{
+    id: StaffId;
+    area: 'card' | 'detail';
+  } | null>(null);
+  const [editingNameValue, setEditingNameValue] = useState('');
+  const [isSavingName, setIsSavingName] = useState(false);
+  const [nameError, setNameError] = useState<string | null>(null);
+
   const [commandInput, setCommandInput] = useState('');
   const [isExecuting, setIsExecuting] = useState(false);
   const [executingTarget, setExecutingTarget] = useState<string | null>(null);
@@ -174,6 +181,32 @@ export function VirtualRestaurant({
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [isVoicePlaying, setIsVoicePlaying] = useState(false);
 
+  const dialogueScenarios = useMemo<
+    Array<{ id: DialogueScenario; label: string }>
+  >(() => {
+    const byId = (id: StaffId) =>
+      getFirstName(
+        staffProfiles.find((p) => p.id === id)?.name ||
+          AI_STAFF_PROFILES.find((p) => p.id === id)?.name ||
+          id
+      );
+
+    return [
+      { id: 'random', label: 'Acak (Semua Tim)' },
+      { id: 'order_kasir', label: `Kasir ${byId('sinta-kasir')} ↔ Pengunjung` },
+      { id: 'kitchen_prep', label: `Kasir ↔ ${byId('dimas-chef')}` },
+      {
+        id: 'snack_bar_sync',
+        label: `Bar ${byId('nadia-snack-bar')} ↔ ${byId('bima-server')}`,
+      },
+      { id: 'table_service', label: `${byId('bima-server')} ↔ Tamu Meja` },
+      {
+        id: 'warehouse_sync',
+        label: `${byId('raka-manager')} ↔ Gudang ${byId('tania-inventory')}`,
+      },
+    ];
+  }, [staffProfiles]);
+
   useEffect(() => {
     const unsub = voicePlayer.subscribePlaying(setIsVoicePlaying);
     return () => {
@@ -185,9 +218,15 @@ export function VirtualRestaurant({
     try {
       const res = await fetch('/api/staff/status');
       if (!res.ok) return;
-      const json = (await res.json()) as { logs?: StaffExecutionLog[] };
+      const json = (await res.json()) as {
+        logs?: StaffExecutionLog[];
+        staffProfiles?: AiStaffProfile[];
+      };
       if (Array.isArray(json.logs) && json.logs.length > 0) {
         setLogs(json.logs);
+      }
+      if (Array.isArray(json.staffProfiles) && json.staffProfiles.length > 0) {
+        setStaffProfiles(json.staffProfiles);
       }
     } catch {
       // Keep current logs silently if network check skips
@@ -197,6 +236,76 @@ export function VirtualRestaurant({
   useEffect(() => {
     void fetchStatus();
   }, [fetchStatus, refreshSignal]);
+
+  const startEditingStaffName = (
+    staff: AiStaffProfile,
+    area: 'card' | 'detail'
+  ) => {
+    setSelectedStaffId(staff.id);
+    setEditingTarget({ id: staff.id, area });
+    setEditingNameValue(staff.name);
+    setNameError(null);
+  };
+
+  const cancelEditingStaffName = () => {
+    setEditingTarget(null);
+    setNameError(null);
+  };
+
+  const saveStaffName = async (staffId: StaffId, resetToDefault = false) => {
+    if (isSavingName) return;
+    const trimmed = editingNameValue.trim();
+    if (!resetToDefault && (trimmed.length < 2 || trimmed.length > 50)) {
+      setNameError('Nama pegawai harus 2–50 karakter.');
+      return;
+    }
+
+    setIsSavingName(true);
+    setNameError(null);
+    try {
+      const res = await fetch(`/api/staff/${encodeURIComponent(staffId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          resetToDefault ? { reset: true } : { name: trimmed }
+        ),
+      });
+      const json = (await res.json()) as {
+        error?: string;
+        staff?: AiStaffProfile;
+        staffProfiles?: AiStaffProfile[];
+      };
+      if (!res.ok) {
+        throw new Error(json.error || 'Gagal menyimpan nama pegawai.');
+      }
+
+      if (Array.isArray(json.staffProfiles)) {
+        setStaffProfiles(json.staffProfiles);
+      }
+      if (json.staff) {
+        const updatedName = json.staff.name;
+        setConversations((prev) =>
+          prev.map((msg) =>
+            msg.speakerId === staffId
+              ? { ...msg, speakerName: updatedName }
+              : msg
+          )
+        );
+        setLogs((prev) =>
+          prev.map((lg) =>
+            lg.staffId === staffId ? { ...lg, staffName: updatedName } : lg
+          )
+        );
+      }
+      setEditingTarget(null);
+    } catch (err: unknown) {
+      setNameError(
+        err instanceof Error ? err.message : 'Gagal memperbarui nama pegawai.'
+      );
+    } finally {
+      setIsSavingName(false);
+    }
+  };
 
   const handleConversationMessage = useCallback((msg: ConversationMessage) => {
     setConversations((prev) => [msg, ...prev].slice(0, 24));
@@ -277,8 +386,12 @@ export function VirtualRestaurant({
   };
 
   const selectedStaff: AiStaffProfile =
-    AI_STAFF_PROFILES.find((s) => s.id === selectedStaffId) ||
-    AI_STAFF_PROFILES[0];
+    staffProfiles.find((s) => s.id === selectedStaffId) || staffProfiles[0];
+  const defaultSelectedStaffName =
+    AI_STAFF_PROFILES.find((s) => s.id === selectedStaff.id)?.name ||
+    selectedStaff.name;
+  const isSelectedNameCustomized =
+    selectedStaff.name !== defaultSelectedStaffName;
 
   const executeStaffCommand = async (
     targetId: StaffId | 'all-team',
@@ -407,6 +520,7 @@ export function VirtualRestaurant({
         <RestaurantSimulator3D
           mode={mode}
           selectedStaffId={selectedStaffId}
+          staffProfiles={staffProfiles}
           onSelectStaff={(id) => setSelectedStaffId(id)}
           incomingOrderEvent={incomingOrderEvent}
           staffCommandEvent={staffCommandEvent}
@@ -430,7 +544,7 @@ export function VirtualRestaurant({
             </div>
 
             <div className="flex flex-wrap items-center gap-1.5">
-              {DIALOGUE_SCENARIOS.map((sc) => (
+              {dialogueScenarios.map((sc) => (
                 <button
                   key={sc.id}
                   type="button"
@@ -524,78 +638,154 @@ export function VirtualRestaurant({
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           {/* Left: 6 AI Employees Roster */}
           <div className="lg:col-span-7 space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-display text-base font-bold text-zinc-900">
                 Tim Karyawan 3D MieLioner (6 Personel Aktif)
               </h3>
               <span className="text-xs text-zinc-500">
-                Klik kartu atau karakter 3D di atas
+                Klik kartu untuk tugas atau ikon pensil untuk ubah nama
               </span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {AI_STAFF_PROFILES.map((staff) => {
+              {staffProfiles.map((staff) => {
                 const Icon = getStaffIcon(staff.id);
                 const isSelected = staff.id === selectedStaffId;
                 const isBusy = isExecuting && executingTarget === staff.id;
                 const hasCompletedLog = logs.some((l) => l.staffId === staff.id);
+                const isEditingCard =
+                  editingTarget?.id === staff.id && editingTarget.area === 'card';
 
                 return (
-                  <button
+                  <div
                     key={staff.id}
-                    type="button"
-                    onClick={() => setSelectedStaffId(staff.id)}
-                    className={`text-left p-4 rounded-xl border transition-colors cursor-pointer ${
+                    className={`rounded-xl border transition-colors ${
                       isSelected
                         ? 'border-orange-600 bg-orange-50/50'
                         : 'border-stone-200 bg-white hover:bg-stone-50'
                     }`}
                   >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div
-                        className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 border ${
-                          isSelected
-                            ? 'bg-orange-600 text-white border-orange-600'
-                            : 'bg-stone-100 text-zinc-700 border-stone-200'
-                        }`}
-                      >
-                        <Icon className="w-4 h-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="font-display text-sm font-bold text-zinc-900 truncate">
-                          {staff.name}
-                        </p>
-                        <p className="text-xs text-zinc-600 truncate">
-                          {staff.role}
-                        </p>
-                      </div>
-                    </div>
+                    <div className="p-4">
+                      <div className="flex items-start justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedStaffId(staff.id)}
+                          className="flex-1 min-w-0 text-left flex items-center gap-2.5 cursor-pointer"
+                        >
+                          <div
+                            className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 border ${
+                              isSelected
+                                ? 'bg-orange-600 text-white border-orange-600'
+                                : 'bg-stone-100 text-zinc-700 border-stone-200'
+                            }`}
+                          >
+                            <Icon className="w-4 h-4" />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="font-display text-sm font-bold text-zinc-900 truncate">
+                              {staff.name}
+                            </p>
+                            <p className="text-xs text-zinc-600 truncate">
+                              {staff.role}
+                            </p>
+                          </div>
+                        </button>
 
-                    <p className="text-xs text-zinc-600 mt-2.5 line-clamp-2 leading-relaxed">
-                      {staff.summary}
-                    </p>
+                        {!isEditingCard && (
+                          <button
+                            type="button"
+                            onClick={() => startEditingStaffName(staff, 'card')}
+                            title={`Edit nama ${staff.name}`}
+                            aria-label={`Edit nama ${staff.name}`}
+                            className="p-1.5 rounded-lg border border-stone-200 bg-white text-zinc-600 hover:text-orange-700 hover:border-orange-400 transition-colors shrink-0 cursor-pointer"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
 
-                    <div className="mt-3 pt-2.5 border-t border-stone-100 flex items-center justify-between gap-2 text-xs">
-                      <span className="text-zinc-500 truncate">
-                        {staff.zoneName}
-                      </span>
-                      <span
-                        className={`font-medium shrink-0 ${
-                          isBusy
-                            ? 'text-orange-700'
-                            : hasCompletedLog
-                            ? 'text-emerald-700'
-                            : 'text-zinc-600'
-                        }`}
+                      {isEditingCard && (
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            void saveStaffName(staff.id);
+                          }}
+                          className="mt-3 pt-2.5 border-t border-stone-200 space-y-2"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              value={editingNameValue}
+                              onChange={(e) =>
+                                setEditingNameValue(e.target.value)
+                              }
+                              maxLength={50}
+                              autoFocus
+                              placeholder="Nama pegawai..."
+                              className="flex-1 min-w-0 min-h-[34px] px-2.5 py-1 text-xs rounded-lg border border-stone-300 bg-white text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-600/20 focus:border-orange-600"
+                            />
+                            <button
+                              type="submit"
+                              disabled={isSavingName}
+                              aria-label="Simpan nama"
+                              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-orange-600 text-white text-xs font-semibold hover:bg-orange-700 inline-flex items-center gap-1 disabled:opacity-50 cursor-pointer"
+                            >
+                              {isSavingName ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Check className="w-3.5 h-3.5" />
+                              )}
+                              <span>Simpan</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={cancelEditingStaffName}
+                              aria-label="Batal edit nama"
+                              className="min-h-[34px] px-2 py-1 rounded-lg border border-stone-300 bg-white text-zinc-700 hover:bg-stone-100 inline-flex items-center justify-center cursor-pointer"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                          {nameError && (
+                            <p className="text-[11px] text-red-700">
+                              {nameError}
+                            </p>
+                          )}
+                        </form>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => setSelectedStaffId(staff.id)}
+                        className="w-full text-left cursor-pointer"
                       >
-                        {isBusy
-                          ? 'Menjalankan...'
-                          : hasCompletedLog
-                          ? 'Tugas Selesai'
-                          : 'Siap Bertugas'}
-                      </span>
+                        <p className="text-xs text-zinc-600 mt-2.5 line-clamp-2 leading-relaxed">
+                          {staff.summary}
+                        </p>
+
+                        <div className="mt-3 pt-2.5 border-t border-stone-100 flex items-center justify-between gap-2 text-xs">
+                          <span className="text-zinc-500 truncate">
+                            {staff.zoneName}
+                          </span>
+                          <span
+                            className={`font-medium shrink-0 ${
+                              isBusy
+                                ? 'text-orange-700'
+                                : hasCompletedLog
+                                ? 'text-emerald-700'
+                                : 'text-zinc-600'
+                            }`}
+                          >
+                            {isBusy
+                              ? 'Menjalankan...'
+                              : hasCompletedLog
+                              ? 'Tugas Selesai'
+                              : 'Siap Bertugas'}
+                          </span>
+                        </div>
+                      </button>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -608,14 +798,104 @@ export function VirtualRestaurant({
                 <div className="w-10 h-10 rounded-xl bg-zinc-900 text-white flex items-center justify-center shrink-0">
                   <SelectedStaffIcon className="w-5 h-5" />
                 </div>
-                <div className="min-w-0">
+                <div className="flex-1 min-w-0">
                   <p className="text-xs font-medium text-zinc-500">
                     {selectedStaff.department} · {selectedStaff.zoneName}
                   </p>
-                  <h3 className="font-display text-lg font-bold text-zinc-900">
-                    {selectedStaff.name}
-                  </h3>
-                  <p className="text-xs font-medium text-orange-700">
+
+                  {editingTarget?.id === selectedStaff.id &&
+                  editingTarget.area === 'detail' ? (
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        void saveStaffName(selectedStaff.id);
+                      }}
+                      className="mt-1.5 space-y-2"
+                    >
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={editingNameValue}
+                          onChange={(e) => setEditingNameValue(e.target.value)}
+                          maxLength={50}
+                          autoFocus
+                          aria-label="Edit nama pegawai terpilih"
+                          className="flex-1 min-w-[160px] min-h-[36px] px-3 py-1.5 text-sm font-semibold rounded-lg border border-stone-300 bg-white text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-600/20 focus:border-orange-600"
+                        />
+                        <button
+                          type="submit"
+                          disabled={isSavingName}
+                          className="min-h-[36px] px-3 py-1.5 rounded-lg bg-orange-600 text-white text-xs font-semibold hover:bg-orange-700 inline-flex items-center gap-1 disabled:opacity-50 cursor-pointer"
+                        >
+                          {isSavingName ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Check className="w-3.5 h-3.5" />
+                          )}
+                          <span>Simpan</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelEditingStaffName}
+                          className="min-h-[36px] px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-zinc-700 text-xs font-semibold hover:bg-stone-100 inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                          <span>Batal</span>
+                        </button>
+                        {isSelectedNameCustomized && (
+                          <button
+                            type="button"
+                            disabled={isSavingName}
+                            onClick={() =>
+                              void saveStaffName(selectedStaff.id, true)
+                            }
+                            title={`Kembalikan ke nama awal (${defaultSelectedStaffName})`}
+                            className="min-h-[36px] px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-zinc-600 text-xs font-medium hover:text-zinc-900 hover:bg-stone-100 inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                            <span>Reset</span>
+                          </button>
+                        )}
+                      </div>
+                      {nameError && (
+                        <p className="text-xs text-red-700">{nameError}</p>
+                      )}
+                    </form>
+                  ) : (
+                    <div className="flex flex-wrap items-center justify-between gap-2 mt-0.5">
+                      <h3 className="font-display text-lg font-bold text-zinc-900">
+                        {selectedStaff.name}
+                      </h3>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            startEditingStaffName(selectedStaff, 'detail')
+                          }
+                          className="px-2.5 py-1 rounded-lg border border-stone-200 bg-white text-zinc-700 hover:border-orange-500 hover:text-orange-700 text-xs font-semibold inline-flex items-center gap-1 transition-colors cursor-pointer"
+                        >
+                          <Pencil className="w-3 h-3" />
+                          <span>Edit Nama</span>
+                        </button>
+                        {isSelectedNameCustomized && (
+                          <button
+                            type="button"
+                            disabled={isSavingName}
+                            onClick={() =>
+                              void saveStaffName(selectedStaff.id, true)
+                            }
+                            title={`Kembalikan ke nama awal (${defaultSelectedStaffName})`}
+                            className="px-2 py-1 rounded-lg border border-stone-200 bg-white text-zinc-600 hover:text-zinc-900 text-[11px] font-medium inline-flex items-center gap-1 transition-colors cursor-pointer"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                            <span>Reset</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <p className="text-xs font-medium text-orange-700 mt-0.5">
                     {selectedStaff.role}
                   </p>
                 </div>
