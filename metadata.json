@@ -1,0 +1,6 @@
+{
+  "name": "MieLioner",
+  "description": "Asisten virtual cerdas, kalkulator pesanan pelanggan, dan dashboard manajemen operasional HPP & stok untuk kedai mie MieLioner.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
